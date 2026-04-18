@@ -129,5 +129,7 @@ func IsConflictError(err error) bool {
 		strings.Contains(errStr, "Conflict") ||
 		strings.Contains(errStr, "conflict") ||
 		strings.Contains(errStr, "Requirement failed") ||
-		strings.Contains(errStr, "requirement failed")
+		strings.Contains(errStr, "requirement failed") ||
+		strings.Contains(errStr, "VersionTokenNotMatch") ||
+		strings.Contains(errStr, "version token")
 }

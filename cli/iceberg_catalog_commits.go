@@ -30,6 +30,11 @@ import (
 
 var icebergCatalogCommitsFlags = []cli.Flag{
 	cli.StringFlag{
+		Name:  "catalog-url",
+		Usage: "直接指定 catalog endpoint URL（支持逗号分隔多 URL），自动推断 catalog 类型",
+		Value: "",
+	},
+	cli.StringFlag{
 		Name:  "external-catalog",
 		Usage: "External catalog type (polaris)",
 		Value: "",
@@ -150,10 +155,24 @@ EXAMPLES:
 func mainIcebergCatalogCommits(ctx *cli.Context) error {
 	checkIcebergCatalogCommitsSyntax(ctx)
 
-	hosts := parseHosts(ctx.String("host"), ctx.Bool("resolve-host"))
-	useTLS := ctx.Bool("tls") || ctx.Bool("ktls")
-	externalCatalog := iceberg.ExternalCatalogType(ctx.String("external-catalog"))
-	catalogURLs := buildCatalogURLs(hosts, useTLS, externalCatalog)
+	var catalogURLs []string
+	var externalCatalog iceberg.ExternalCatalogType
+
+	if catalogURL := ctx.String("catalog-url"); catalogURL != "" {
+		catalogURLs = parseCatalogURLs(catalogURL)
+		externalCatalog = iceberg.DetectCatalogType(catalogURLs[0])
+	} else {
+		hosts := parseHosts(ctx.String("host"), ctx.Bool("resolve-host"))
+		useTLS := ctx.Bool("tls") || ctx.Bool("ktls")
+		externalCatalog = iceberg.ExternalCatalogType(ctx.String("external-catalog"))
+		catalogURLs = buildCatalogURLs(hosts, useTLS, externalCatalog)
+	}
+
+	// S3 Tables: restrict to single-level namespaces and disable views
+	if externalCatalog == iceberg.ExternalCatalogS3Tables {
+		ctx.Set("namespace-depth", "1")
+		ctx.Set("views-per-ns", "0")
+	}
 
 	catalogCfg := iceberg.CatalogConfig{
 		CatalogURI:      catalogURLs[0],
@@ -182,6 +201,10 @@ func mainIcebergCatalogCommits(ctx *cli.Context) error {
 		ViewsPerNS:     ctx.Int("views-per-ns"),
 		BaseLocation:   ctx.String("base-location"),
 		CatalogName:    ctx.String("catalog-name"),
+	}
+
+	if externalCatalog == iceberg.ExternalCatalogS3Tables {
+		treeCfg.PropertiesPerNS = 0
 	}
 
 	b := bench.IcebergCommits{

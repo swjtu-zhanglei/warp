@@ -146,7 +146,9 @@ func (b *IcebergRead) Start(ctx context.Context, wait chan struct{}) error {
 				operation := b.Dist.getOp()
 				switch operation {
 				case OpNSList:
-					if len(b.namespaces) > 0 {
+					if b.ExternalCatalog == iceberg.ExternalCatalogS3Tables {
+						b.listRootNamespaces(opCtx, rcv, thread, catalogName, cat)
+					} else if len(b.namespaces) > 0 {
 						ns := b.namespaces[nsIdx%len(b.namespaces)]
 						nsIdx++
 						b.listNamespaces(opCtx, rcv, thread, catalogName, ns, cat)
@@ -249,6 +251,22 @@ func (b *IcebergRead) listNamespaces(ctx context.Context, rcv chan<- Operation, 
 	}
 	op.Start = time.Now()
 	_, err := cat.ListNamespaces(ctx, ns.Path)
+	op.End = time.Now()
+	if err != nil {
+		op.Err = err.Error()
+	}
+	rcv <- op
+}
+
+func (b *IcebergRead) listRootNamespaces(ctx context.Context, rcv chan<- Operation, thread int, catalogName string, cat *rest.Catalog) {
+	op := Operation{
+		OpType:   OpNSList,
+		Thread:   uint32(thread),
+		File:     fmt.Sprintf("%s/", catalogName),
+		Endpoint: catalogName,
+	}
+	op.Start = time.Now()
+	_, err := cat.ListNamespaces(ctx, []string{})
 	op.End = time.Now()
 	if err != nil {
 		op.Err = err.Error()

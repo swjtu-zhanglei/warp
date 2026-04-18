@@ -19,6 +19,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/minio/cli"
@@ -29,6 +30,11 @@ import (
 )
 
 var icebergSustainedFlags = []cli.Flag{
+	cli.StringFlag{
+		Name:  "catalog-url",
+		Usage: "直接指定 catalog endpoint URL（支持逗号分隔多 URL），自动推断 catalog 类型",
+		Value: "",
+	},
 	cli.StringFlag{
 		Name:  "external-catalog",
 		Usage: "External catalog type (polaris)",
@@ -218,10 +224,32 @@ func mainIcebergSustained(ctx *cli.Context) error {
 		backoffMax = 60 * time.Second
 	}
 
-	hosts := parseHosts(ctx.String("host"), ctx.Bool("resolve-host"))
-	useTLS := ctx.Bool("tls") || ctx.Bool("ktls")
-	externalCatalog := iceberg.ExternalCatalogType(ctx.String("external-catalog"))
-	catalogURLs := buildCatalogURLs(hosts, useTLS, externalCatalog)
+	var catalogURLs []string
+	var externalCatalog iceberg.ExternalCatalogType
+
+	if catalogURL := ctx.String("catalog-url"); catalogURL != "" {
+		catalogURLs = parseCatalogURLs(catalogURL)
+		externalCatalog = iceberg.DetectCatalogType(catalogURLs[0])
+	} else {
+		hosts := parseHosts(ctx.String("host"), ctx.Bool("resolve-host"))
+		useTLS := ctx.Bool("tls") || ctx.Bool("ktls")
+		externalCatalog = iceberg.ExternalCatalogType(ctx.String("external-catalog"))
+		catalogURLs = buildCatalogURLs(hosts, useTLS, externalCatalog)
+	}
+
+	// S3 Tables: restrict to single-level namespaces
+	if externalCatalog == iceberg.ExternalCatalogS3Tables {
+		ctx.Set("namespace-depth", "1")
+	}
+
+	s3Endpoint := ctx.String("s3-host")
+	if s3Endpoint != "" && !strings.HasPrefix(s3Endpoint, "http://") && !strings.HasPrefix(s3Endpoint, "https://") {
+		if ctx.Bool("s3-tls") {
+			s3Endpoint = "https://" + s3Endpoint
+		} else {
+			s3Endpoint = "http://" + s3Endpoint
+		}
+	}
 
 	catalogCfg := iceberg.CatalogConfig{
 		CatalogURI:      catalogURLs[0],
@@ -229,6 +257,7 @@ func mainIcebergSustained(ctx *cli.Context) error {
 		AccessKey:       ctx.String("access-key"),
 		SecretKey:       ctx.String("secret-key"),
 		Region:          ctx.String("region"),
+		S3Endpoint:      s3Endpoint,
 		ExternalCatalog: externalCatalog,
 	}
 
@@ -261,6 +290,10 @@ func mainIcebergSustained(ctx *cli.Context) error {
 		CatalogName:      ctx.String("catalog-name"),
 	}
 
+	if externalCatalog == iceberg.ExternalCatalogS3Tables {
+		treeCfg.PropertiesPerNS = 0
+	}
+
 	b := bench.Iceberg{
 		Common:          getCommon(ctx, nil),
 		Catalog:         cat,
@@ -285,6 +318,7 @@ func mainIcebergSustained(ctx *cli.Context) error {
 		S3AccessKey:     ctx.String("s3-access-key"),
 		S3SecretKey:     ctx.String("s3-secret-key"),
 		S3TLS:           ctx.Bool("s3-tls"),
+		S3Lookup:        parseBucketLookup(ctx.String("lookup")),
 		SimulateRead:    ctx.Bool("simulate-read"),
 		ReadConcurrent:  ctx.Int("read-concurrent"),
 		ReadRpsLimit:    ctx.Float64("read-rps-limit"),

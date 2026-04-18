@@ -252,6 +252,18 @@ func clientTransportWithLocalIP(ctx *cli.Context, localIP string) http.RoundTrip
 	}
 }
 
+// parseBucketLookup parses the lookup string and returns the corresponding BucketLookupType.
+func parseBucketLookup(s string) minio.BucketLookupType {
+	switch s {
+	case "host":
+		return minio.BucketLookupDNS
+	case "path":
+		return minio.BucketLookupPath
+	default:
+		return minio.BucketLookupAuto
+	}
+}
+
 // parseHosts will parse the host parameter given.
 func parseHosts(h string, resolveDNS bool) []string {
 	hosts := strings.Split(h, ",")
@@ -368,6 +380,19 @@ func buildCatalogURLs(hosts []string, useTLS bool, externalCatalog iceberg.Exter
 	urls := make([]string, len(hosts))
 	for i, host := range hosts {
 		urls[i] = scheme + "://" + host + catalogPath
+	}
+	return urls
+}
+
+// parseCatalogURLs splits a comma-separated catalog-url string into individual URLs.
+func parseCatalogURLs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	urls := make([]string, len(parts))
+	for i, p := range parts {
+		urls[i] = strings.TrimSpace(p)
 	}
 	return urls
 }

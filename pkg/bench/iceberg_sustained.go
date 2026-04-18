@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -68,6 +69,7 @@ type Iceberg struct {
 	S3AccessKey string
 	S3SecretKey string
 	S3TLS       bool
+	S3Lookup    minio.BucketLookupType
 	s3Clients   []*minio.Client
 	s3Counter   uint64
 
@@ -77,7 +79,7 @@ type Iceberg struct {
 	readRpsLimiter *rate.Limiter
 
 	dataFiles      []string
-	preparedPaths  []string
+	preparedPaths  map[int][]string // key: table index, value: data paths for that table
 	tables         []warpiceberg.TableInfo
 	prefixes       map[string]struct{}
 	loadedTables   map[string]*table.Table
@@ -146,9 +148,14 @@ func (b *Iceberg) Prepare(ctx context.Context) error {
 	if len(b.S3Hosts) > 0 {
 		b.s3Clients = make([]*minio.Client, len(b.S3Hosts))
 		for i, host := range b.S3Hosts {
+			host = strings.TrimPrefix(host, "http://")
+			host = strings.TrimPrefix(host, "https://")
+
 			client, err := minio.New(host, &minio.Options{
-				Creds:  miniocreds.NewStaticV4(b.S3AccessKey, b.S3SecretKey, ""),
-				Secure: b.S3TLS,
+				Creds:        miniocreds.NewStaticV4(b.S3AccessKey, b.S3SecretKey, ""),
+				Secure:       b.S3TLS,
+				BucketLookup: b.S3Lookup,
+				Region:       b.Location,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to create S3 client for %s: %w", host, err)
@@ -357,47 +364,56 @@ func (b *Iceberg) uploadPreparedFiles(ctx context.Context) error {
 		return fmt.Errorf("no tables available for skip-upload mode")
 	}
 
-	bucket, tablePrefix := parseTableLocation(b.tables[0].Location)
-	if bucket == "" {
-		bucket = b.TreeConfig.CatalogName
+	b.preparedPaths = make(map[int][]string, len(b.tables))
+
+	for tblIdx, tbl := range b.tables {
+		bucket, tablePrefix := parseTableLocation(tbl.Location)
+		if bucket == "" {
+			bucket = b.TreeConfig.CatalogName
+		}
+		prefix := path.Join(tablePrefix, "prepared")
+
+		client, cldone := b.getS3Client()
+
+		if b.UpdateStatus != nil {
+			b.UpdateStatus(fmt.Sprintf("Uploading files for table %d (%s)...", tblIdx, tbl.Name))
+		}
+
+		paths := make([]string, 0, len(b.dataFiles))
+		for i, localFile := range b.dataFiles {
+			objName := fmt.Sprintf("%s/file-%d.parquet", prefix, i)
+
+			f, err := os.Open(localFile)
+			if err != nil {
+				cldone()
+				return fmt.Errorf("failed to open %s: %w", localFile, err)
+			}
+
+			info, _ := f.Stat()
+			opts := b.PutOpts
+			opts.ContentType = "application/octet-stream"
+
+			_, err = client.PutObject(ctx, bucket, objName, f, info.Size(), opts)
+			f.Close()
+			if err != nil {
+				cldone()
+				return fmt.Errorf("failed to upload %s to bucket %s: %w", localFile, bucket, err)
+			}
+
+			paths = append(paths, fmt.Sprintf("s3://%s/%s", bucket, objName))
+
+			if b.UpdateStatus != nil && (i+1)%10 == 0 {
+				b.UpdateStatus(fmt.Sprintf("Table %d: Uploaded %d/%d files...", tblIdx, i+1, len(b.dataFiles)))
+			}
+		}
+		cldone()
+
+		b.preparedPaths[tblIdx] = paths
 	}
-	prefix := fmt.Sprintf("%s/prepared", tablePrefix)
 
-	client, cldone := b.getS3Client()
-	defer cldone()
-
+	totalFiles := len(b.tables) * len(b.dataFiles)
 	if b.UpdateStatus != nil {
-		b.UpdateStatus("Uploading files for commit-only benchmark...")
-	}
-
-	b.preparedPaths = make([]string, 0, len(b.dataFiles))
-	for i, localFile := range b.dataFiles {
-		objName := fmt.Sprintf("%s/file-%d.parquet", prefix, i)
-
-		f, err := os.Open(localFile)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", localFile, err)
-		}
-
-		info, _ := f.Stat()
-		opts := b.PutOpts
-		opts.ContentType = "application/octet-stream"
-
-		_, err = client.PutObject(ctx, bucket, objName, f, info.Size(), opts)
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", localFile, err)
-		}
-
-		b.preparedPaths = append(b.preparedPaths, fmt.Sprintf("s3://%s/%s", bucket, objName))
-
-		if b.UpdateStatus != nil && (i+1)%10 == 0 {
-			b.UpdateStatus(fmt.Sprintf("Uploaded %d/%d files...", i+1, len(b.dataFiles)))
-		}
-	}
-
-	if b.UpdateStatus != nil {
-		b.UpdateStatus(fmt.Sprintf("Uploaded %d files for commit-only benchmark", len(b.preparedPaths)))
+		b.UpdateStatus(fmt.Sprintf("Uploaded %d files across %d tables for commit-only benchmark", totalFiles, len(b.tables)))
 	}
 
 	return nil
@@ -446,7 +462,7 @@ func (b *Iceberg) Start(ctx context.Context, wait chan struct{}) error {
 
 			done := ctx.Done()
 			opCtx := context.Background()
-			tableIdx := workerID
+			fixedTblIdx := workerID % len(b.tables) // Assign worker to a fixed table
 			fileIdx := workerID * filesPerCommit
 
 			<-wait
@@ -458,8 +474,7 @@ func (b *Iceberg) Start(ctx context.Context, wait chan struct{}) error {
 				default:
 				}
 
-				tbl := b.tables[tableIdx%len(b.tables)]
-				tableIdx++
+				tbl := b.tables[fixedTblIdx]
 
 				tableBucket, tablePrefix := parseTableLocation(tbl.Location)
 				if tableBucket == "" {
@@ -471,20 +486,27 @@ func (b *Iceberg) Start(ctx context.Context, wait chan struct{}) error {
 						return
 					}
 
+					tablePaths := b.preparedPaths[fixedTblIdx]
+
 					numFiles := filesPerCommit
-					if numFiles > len(b.preparedPaths) {
-						numFiles = len(b.preparedPaths)
+					if numFiles > len(tablePaths) {
+						numFiles = len(tablePaths)
 					}
 
 					commitPaths := make([]string, 0, numFiles)
 					for j := 0; j < numFiles; j++ {
-						commitPaths = append(commitPaths, b.preparedPaths[fileIdx%len(b.preparedPaths)])
+						commitPaths = append(commitPaths, tablePaths[fileIdx%len(tablePaths)])
 						fileIdx++
 					}
 
 					b.doCommit(opCtx, rcv, tbl, commitPaths, uint32(workerID))
 				} else {
-					prefix := fmt.Sprintf("%s/data/worker-%d", tablePrefix, workerID)
+					prefix := tablePrefix
+					if prefix == "" {
+						prefix = fmt.Sprintf("data/worker-%d", workerID)
+					} else {
+						prefix = fmt.Sprintf("%s/data/worker-%d", tablePrefix, workerID)
+					}
 
 					var uploadedPaths []string
 					for localFileIdx, localFile := range files {
@@ -620,25 +642,29 @@ func (b *Iceberg) buildPreparedPaths() error {
 		return fmt.Errorf("no tables available for skip-upload mode")
 	}
 
-	bucket, tablePrefix := parseTableLocation(b.tables[0].Location)
-	if bucket == "" {
-		bucket = b.TreeConfig.CatalogName
-	}
-	prefix := fmt.Sprintf("%s/prepared", tablePrefix)
+	b.preparedPaths = make(map[int][]string, len(b.tables))
 
-	b.preparedPaths = make([]string, len(b.dataFiles))
-	for i := range b.dataFiles {
-		objName := fmt.Sprintf("%s/file-%d.parquet", prefix, i)
-		b.preparedPaths[i] = fmt.Sprintf("s3://%s/%s", bucket, objName)
+	for tblIdx, tbl := range b.tables {
+		bucket, tablePrefix := parseTableLocation(tbl.Location)
+		if bucket == "" {
+			bucket = b.TreeConfig.CatalogName
+		}
+		prefix := path.Join(tablePrefix, "prepared")
+
+		paths := make([]string, len(b.dataFiles))
+		for i := range b.dataFiles {
+			objName := fmt.Sprintf("%s/file-%d.parquet", prefix, i)
+			paths[i] = fmt.Sprintf("s3://%s/%s", bucket, objName)
+		}
+		b.preparedPaths[tblIdx] = paths
 	}
 
 	return nil
 }
 
 func (b *Iceberg) doCommit(ctx context.Context, rcv chan<- Operation, tbl warpiceberg.TableInfo, paths []string, workerID uint32) {
-	client, cldone := b.Client()
-	endpoint := client.EndpointURL().String()
-	cldone()
+	// Use catalog URI as endpoint (works for both --catalog-url and --host cases)
+	endpoint := b.CatalogURI
 
 	loadedTbl := b.getLoadedTable(tbl)
 	if loadedTbl == nil {
@@ -691,13 +717,19 @@ func (b *Iceberg) Cleanup(ctx context.Context) {
 
 	if b.SkipUpload {
 		client, cldone := b.getS3Client()
-		bucket := b.TreeConfig.CatalogName
-		prefix := "prepared"
-		for obj := range client.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: prefix + "/", Recursive: true}) {
-			if obj.Err != nil {
-				continue
+		// Clean up prepared files from each table's bucket
+		for _, tbl := range b.tables {
+			bucket, tablePrefix := parseTableLocation(tbl.Location)
+			if bucket == "" {
+				bucket = b.TreeConfig.CatalogName
 			}
-			_ = client.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{})
+			prefix := path.Join(tablePrefix, "prepared")
+			for obj := range client.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: prefix + "/", Recursive: true}) {
+				if obj.Err != nil {
+					continue
+				}
+				_ = client.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{})
+			}
 		}
 		cldone()
 	}
@@ -751,6 +783,7 @@ func parseTableLocation(location string) (bucket, prefix string) {
 	loc := location
 	loc = strings.TrimPrefix(loc, "s3://")
 	loc = strings.TrimPrefix(loc, "s3a://")
+	loc = strings.TrimPrefix(loc, "oss://")
 
 	parts := strings.SplitN(loc, "/", 2)
 	if len(parts) >= 1 {

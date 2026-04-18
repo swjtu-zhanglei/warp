@@ -178,7 +178,7 @@ func (b *IcebergCommits) runTableCommits(ctx context.Context, wait chan struct{}
 		op.Start = time.Now()
 		var err error
 		for retry := 0; retry < b.MaxRetries; retry++ {
-			_, err = cat.UpdateTable(opCtx, ident, nil, updates)
+			_, err = cat.UpdateTable(opCtx, ident, []table.Requirement{}, updates)
 			if err == nil || !isRetryable(err) {
 				break
 			}

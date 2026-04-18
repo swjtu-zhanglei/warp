@@ -193,9 +193,13 @@ func (b *IcebergMixed) Start(ctx context.Context, wait chan struct{}) error {
 				operation := b.Dist.getOp()
 				switch operation {
 				case OpNSList:
-					ns := b.namespaces[nsListIdx%len(b.namespaces)]
-					nsListIdx++
-					b.doFetchAllChildrenNamespaces(opCtx, rcv, thread, catalogName, ns, cat)
+					if b.ExternalCatalog == icebergpkg.ExternalCatalogS3Tables {
+						b.doListRootNamespaces(opCtx, rcv, thread, catalogName, cat)
+					} else {
+						ns := b.namespaces[nsListIdx%len(b.namespaces)]
+						nsListIdx++
+						b.doFetchAllChildrenNamespaces(opCtx, rcv, thread, catalogName, ns, cat)
+					}
 				case OpNSHead:
 					ns := b.namespaces[nsExistsIdx%len(b.namespaces)]
 					nsExistsIdx++
@@ -276,6 +280,22 @@ func (b *IcebergMixed) doFetchAllChildrenNamespaces(ctx context.Context, rcv cha
 	}
 	op.Start = time.Now()
 	_, err := cat.ListNamespaces(ctx, ns.Path)
+	op.End = time.Now()
+	if err != nil {
+		op.Err = err.Error()
+	}
+	rcv <- op
+}
+
+func (b *IcebergMixed) doListRootNamespaces(ctx context.Context, rcv chan<- Operation, thread int, catalogName string, cat *rest.Catalog) {
+	op := Operation{
+		OpType:   OpNSList,
+		Thread:   uint32(thread),
+		File:     fmt.Sprintf("%s/", catalogName),
+		Endpoint: catalogName,
+	}
+	op.Start = time.Now()
+	_, err := cat.ListNamespaces(ctx, []string{})
 	op.End = time.Now()
 	if err != nil {
 		op.Err = err.Error()
@@ -471,7 +491,7 @@ func (b *IcebergMixed) doUpdateTable(ctx context.Context, rcv chan<- Operation, 
 	op.Start = time.Now()
 	var err error
 	for retry := 0; retry < b.MaxRetries; retry++ {
-		_, err = cat.UpdateTable(ctx, ident, nil, updates)
+		_, err = cat.UpdateTable(ctx, ident, []table.Requirement{}, updates)
 		if err == nil || !isRetryable(err) {
 			break
 		}

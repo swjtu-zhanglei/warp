@@ -43,7 +43,32 @@ func NewTree(cfg TreeConfig) *Tree {
 	return &Tree{cfg: cfg}
 }
 
+// isFlat returns true when the tree represents a flat namespace layout
+// (depth=1). In flat mode, all namespaces are siblings with single-element
+// paths — this is required by catalogs like AWS S3 Tables that only support
+// single-level namespaces. The tree produces NamespaceWidth independent
+// leaf namespaces instead of a single root node.
+func (t *Tree) isFlat() bool {
+	return t.cfg.NamespaceDepth == 1
+}
+
+// TotalNamespaces returns the total number of namespace nodes in the tree.
+//
+// Tree has two layout modes:
+//
+//   - Flat mode (depth=1): Produces NamespaceWidth independent leaf
+//     namespaces. Each namespace has a single-element path (e.g. ["ns0"]).
+//     Example: width=5, depth=1 → 5 namespaces: ns0..ns4, all are leaves.
+//
+//   - Hierarchical mode (depth>1): Produces a full N-ary tree where each
+//     node at depth k has NamespaceWidth children. Only leaf nodes (at
+//     depth = NamespaceDepth-1) contain tables/views.
+//     Example: width=2, depth=3 → 7 namespaces in a binary tree:
+//     ns0 → ns1,ns2 → ns3,ns4,ns5,ns6
 func (t *Tree) TotalNamespaces() int {
+	if t.isFlat() {
+		return t.cfg.NamespaceWidth
+	}
 	if t.cfg.NamespaceWidth == 1 {
 		return t.cfg.NamespaceDepth
 	}
@@ -54,7 +79,14 @@ func (t *Tree) TotalNamespaces() int {
 	return (n - 1) / (t.cfg.NamespaceWidth - 1)
 }
 
+// LeafNamespaces returns the number of leaf namespaces that hold tables/views.
+//
+//   - Flat mode: all namespaces are leaves.
+//   - Hierarchical mode: leaf nodes are at the bottom level of the N-ary tree.
 func (t *Tree) LeafNamespaces() int {
+	if t.isFlat() {
+		return t.cfg.NamespaceWidth
+	}
 	n := 1
 	for i := 0; i < t.cfg.NamespaceDepth-1; i++ {
 		n *= t.cfg.NamespaceWidth
@@ -70,7 +102,14 @@ func (t *Tree) TotalViews() int {
 	return t.LeafNamespaces() * t.cfg.ViewsPerNS
 }
 
+// DepthOf returns the depth of the namespace node at the given ordinal.
+//
+//   - Flat mode: all nodes are at depth 0.
+//   - Hierarchical mode: depth is determined by the level in the N-ary tree.
 func (t *Tree) DepthOf(ordinal int) int {
+	if t.isFlat() {
+		return 0
+	}
 	if t.cfg.NamespaceWidth == 1 {
 		return ordinal
 	}
@@ -85,7 +124,17 @@ func (t *Tree) DepthOf(ordinal int) int {
 	return depth
 }
 
+// PathToRoot returns the hierarchical namespace path for the node at the
+// given ordinal. The path is ordered from root to leaf.
+//
+//   - Flat mode: returns a single-element path (e.g. ["ns0"]), suitable for
+//     catalogs that only support single-level namespaces like AWS S3 Tables.
+//   - Hierarchical mode: returns a multi-element path from root ancestor to
+//     this node (e.g. ["ns0", "ns1", "ns3"]).
 func (t *Tree) PathToRoot(ordinal int) []string {
+	if t.isFlat() {
+		return []string{t.namespaceName(ordinal)}
+	}
 	// Build hierarchical path from root to this node
 	var path []int
 	current := ordinal
@@ -101,7 +150,15 @@ func (t *Tree) PathToRoot(ordinal int) []string {
 	return result
 }
 
+// parentOf returns the ordinal of the parent node, or -1 if the node has no
+// parent (root node in hierarchical mode, or any node in flat mode).
+//
+//   - Flat mode: no parent — all namespaces are independent.
+//   - Hierarchical mode: parent is determined by N-ary tree structure.
 func (t *Tree) parentOf(ordinal int) int {
+	if t.isFlat() {
+		return -1
+	}
 	if ordinal == 0 {
 		return -1
 	}
@@ -111,7 +168,15 @@ func (t *Tree) parentOf(ordinal int) int {
 	return (ordinal - 1) / t.cfg.NamespaceWidth
 }
 
+// ChildrenOf returns the ordinals of the child nodes of the given namespace.
+//
+//   - Flat mode: no children — all namespaces are leaves.
+//   - Hierarchical mode: returns the width child nodes, or nil if at max depth.
 func (t *Tree) ChildrenOf(ordinal int) []int {
+	if t.isFlat() {
+		return nil
+	}
+
 	if t.DepthOf(ordinal) >= t.cfg.NamespaceDepth-1 {
 		return nil
 	}
@@ -128,7 +193,15 @@ func (t *Tree) ChildrenOf(ordinal int) []int {
 	return children
 }
 
+// IsLeaf returns true if the namespace node at the given ordinal is a leaf
+// (contains tables/views rather than sub-namespaces).
+//
+//   - Flat mode: all namespaces are leaves.
+//   - Hierarchical mode: leaf nodes are at depth = NamespaceDepth-1.
 func (t *Tree) IsLeaf(ordinal int) bool {
+	if t.isFlat() {
+		return true
+	}
 	return t.DepthOf(ordinal) == t.cfg.NamespaceDepth-1
 }
 

@@ -48,8 +48,9 @@ type ExternalCatalogType string
 
 // External catalog type constants.
 const (
-	ExternalCatalogNone    ExternalCatalogType = ""
-	ExternalCatalogPolaris ExternalCatalogType = "polaris"
+	ExternalCatalogNone     ExternalCatalogType = ""
+	ExternalCatalogPolaris  ExternalCatalogType = "polaris"
+	ExternalCatalogS3Tables ExternalCatalogType = "s3tables"
 )
 
 // sharedCatalogTransport is a global high-performance transport shared across all catalog clients.
@@ -75,11 +76,34 @@ type CatalogConfig struct {
 	ExternalCatalog ExternalCatalogType // External catalog type (polaris, etc.)
 }
 
+// DetectCatalogType infers the catalog type from the URL.
+// This allows --catalog-url to work without needing --external-catalog.
+//
+// Only URLs with path "/_iceberg" are treated as AIStor (ExternalCatalogNone),
+// which triggers warehouse creation/deletion. All other URLs are treated as
+// S3 Tables-like catalogs (ExternalCatalogS3Tables), which skip warehouse
+// operations and apply single-level namespace restrictions.
+func DetectCatalogType(rawURL string) ExternalCatalogType {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ExternalCatalogS3Tables
+	}
+	if strings.Contains(u.Path, "/_iceberg") {
+		return ExternalCatalogNone
+	}
+	if strings.Contains(u.Path, "/api/catalog") {
+		return ExternalCatalogPolaris
+	}
+	return ExternalCatalogS3Tables
+}
+
 // NewCatalog creates a new Iceberg REST catalog connection.
 func NewCatalog(ctx context.Context, cfg CatalogConfig) (*rest.Catalog, error) {
 	switch cfg.ExternalCatalog {
 	case ExternalCatalogPolaris:
 		return newPolarisCatalog(ctx, cfg)
+	case ExternalCatalogS3Tables:
+		return newAIStorCatalog(ctx, cfg)
 	default:
 		return newAIStorCatalog(ctx, cfg)
 	}
@@ -113,6 +137,7 @@ func newAIStorCatalog(ctx context.Context, cfg CatalogConfig) (*rest.Catalog, er
 	}
 	if cfg.S3Endpoint != "" {
 		s3Props["s3.endpoint"] = cfg.S3Endpoint
+		s3Props["s3.force-virtual-addressing"] = "true"
 	}
 
 	opts := []rest.Option{
@@ -153,7 +178,8 @@ func newPolarisCatalog(ctx context.Context, cfg CatalogConfig) (*rest.Catalog, e
 	// Add S3 properties if S3 endpoint is configured
 	if cfg.S3Endpoint != "" {
 		s3Props := iceberg.Properties{
-			"s3.endpoint": cfg.S3Endpoint,
+			"s3.endpoint":                cfg.S3Endpoint,
+			"s3.force-virtual-addressing": "true",
 		}
 		if cfg.Region != "" {
 			s3Props["s3.region"] = cfg.Region

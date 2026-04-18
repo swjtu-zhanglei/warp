@@ -244,7 +244,11 @@ func (d *DatasetCreator) DeleteAll(ctx context.Context) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				ident := toTableIdentifier(tbl.Namespace, tbl.Name)
-				_ = d.getCatalog().DropTable(ctx, ident)
+					if d.ExternalCatalog == ExternalCatalogS3Tables {
+						_ = d.getCatalog().PurgeTable(ctx, ident)
+					} else {
+						_ = d.getCatalog().DropTable(ctx, ident)
+					}
 			}(tbl)
 		}
 		wg.Wait()

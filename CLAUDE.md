@@ -2,181 +2,220 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## 项目概述
 
-Warp is a high-performance S3 benchmarking tool for testing object storage systems. It supports multiple benchmark types (GET, PUT, DELETE, LIST, STAT, etc.) and can run in distributed mode with multiple clients coordinating through a server.
+Warp 是一个高性能 S3 基准测试工具，用于测试对象存储系统。它支持多种基准测试类型（GET、PUT、DELETE、LIST、STAT 等），可以在分布式模式下运行，多个客户端通过服务器协调执行。此外还包含 Iceberg REST catalog 基准测试，用于测试 Apache Iceberg 元数据操作。
 
-## Build and Test Commands
+构建需要 Go 1.25 或更高版本。
 
-### Building
+## 构建和测试命令
+
+### 构建
 ```bash
-# Build the binary
+# 构建二进制文件（需要 Go 1.25+）
 go build
 
-# Run the binary
+# 运行程序
 ./warp [command] [options]
 ```
 
-### Testing
+### 测试
 ```bash
-# Run all tests with race detection
+# 运行所有测试（启用竞态检测）
 go test -v -race ./...
 
-# Run tests for a specific package
+# 运行特定包的测试
 go test -v ./pkg/bench
 go test -v ./pkg/aggregate
 ```
 
-### Linting and Formatting
+### 代码检查和格式化
 ```bash
-# Run golangci-lint (requires installation)
+# 运行 golangci-lint（需要先安装）
 golangci-lint run --timeout=5m --config ./.golangci.yml
 
-# Run go vet
+# 运行 go vet
 go vet ./...
 
-# Check formatting
+# 检查代码格式
 gofmt -d .
 
-# Format code
+# 格式化代码
 gofmt -w .
 ```
 
-### Assistant workflow for linting
+### 代码编辑后的检查流程
 
-- Encourage and/or effect installation of gofumpt and golangci-lint
-- After any code edit, format first, then lint:
-  - When both tools are installed: run formatting and linting in a single shell to avoid extra confirmations:
+- 鼓励安装 gofumpt 和 golangci-lint
+- 每次代码编辑后，先格式化再检查：
+  - 两个工具都已安装时：在单个 shell 中执行以减少确认次数：
     ```bash
     cd <root-of-code-tree> && gofumpt -extra -w . && golangci-lint run -j16
     ```
-  - Format (preferred): `gofumpt -extra -w .`
-    - If gofumpt is unavailable, fall back: `gofmt -w .` and surface install steps for gofumpt (e.g., `go install mvdan.cc/gofumpt@latest` or `brew install gofumpt`).
-  - Then run the linter with the repo config, if possible:
-    - Prefer PATH: `golangci-lint run -j16`
-    - Fallback GOPATH if needed: `$(go env GOPATH)/bin/golangci-lint run -j16`
-    - If missing or built with an older Go than `go.mod` toolchain, surface concise upgrade/install steps and proceed with file-scoped lint checks locally.
-  - Re-run after fixes until clean or blocked.
+  - 格式化（首选）：`gofumpt -extra -w .`
+    - 如果 gofumpt 未安装，使用：`gofmt -w .` 并提示安装方法（`go install mvdan.cc/gofumpt@latest` 或 `brew install gofumpt`）
+  - 然后运行 linter（尽量使用仓库配置）：
+    - 首选 PATH：`golangci-lint run -j16`
+    - 备选 GOPATH：`$(go env GOPATH)/bin/golangci-lint run -j16`
+    - 如果缺失或使用旧版 Go 构建，提示升级/安装步骤，并在本地进行文件级别的 lint 检查
+  - 修复后重新运行直到通过或遇到阻塞问题
 
-## Architecture
+## 架构
 
-### Core Components
+### 核心组件
 
-The packages follow a layered dependency structure:
+包之间采用分层依赖结构：
 
-**pkg/generator/** - Test data generation (base package with no warp dependencies)
-- Random data generation for benchmark objects
-- Supports fixed size, random sizes, and bucketed sizes
+**pkg/generator/** - 测试数据生成（基础包，无 warp 依赖）
+- 随机数据生成用于基准测试对象
+- 支持固定大小、随机大小和分桶大小
 
-**pkg/bench/** - Benchmark implementations (imports pkg/generator)
-- `benchmark.go` - Core `Benchmark` interface with `Prepare()`, `Start()`, `Cleanup()` methods
-- `Common` struct contains shared configuration (bucket, concurrency, clients, etc.)
-- Each operation type implements the Benchmark interface (get.go, put.go, mixed.go, etc.)
-- `ops.go` - Reusable operation functions (upload, download, delete operations)
-- `collector.go` - Real-time operation statistics collection
+**pkg/bench/** - 基准测试实现（导入 pkg/generator）
+- `benchmark.go` - 核心 `Benchmark` 接口，包含 `Prepare()`、`Start()`、`Cleanup()` 方法
+- `Common` 结构体包含共享配置（bucket、concurrency、clients 等）
+- 每种操作类型实现 Benchmark 接口（get.go、put.go、mixed.go 等）
+- `ops.go` - 可复用的操作函数（上传、下载、删除操作）
+- `collector.go` - 实时操作统计收集
 
-**pkg/aggregate/** - Data aggregation and analysis (imports pkg/bench)
-- `aggregate.go` - Aggregates raw operation data into statistics
-- `throughput.go` - Throughput calculations and statistics
-- `requests.go` - Per-request statistics (latency, TTFB, percentiles)
-- `compare.go` - Comparison between benchmark runs
-- `live.go` - Live statistics updates during benchmark runs
+**pkg/aggregate/** - 数据聚合和分析（导入 pkg/bench）
+- `aggregate.go` - 将原始操作数据聚合为统计信息
+- `throughput.go` - 吞吐量计算和统计
+- `requests.go` - 每请求统计（延迟、TTFB、百分位数）
+- `compare.go` - 基准测试运行结果对比
+- `live.go` - 基准测试运行期间的实时统计更新
 
-**api/** - HTTP API for benchmark status and control (imports pkg/bench and pkg/aggregate)
-- `api.go` - Provides HTTP endpoints for monitoring running benchmarks
+**pkg/iceberg/** - Iceberg REST catalog 工具（用于 Iceberg 基准测试）
+- `catalog.go` - Catalog 连接创建（支持 AIStor Tables、Polaris）
+- `tree.go` - Namespace 树结构管理
+- `rest/helpers.go` - REST API 辅助函数
+- 支持 MinIO AIStor Tables（SigV4 认证）和 Apache Polaris（OAuth2 认证）
 
-**cli/** - Command-line interface layer (imports api, pkg/aggregate, pkg/bench, pkg/generator)
-- Each benchmark type has its own file (get.go, put.go, delete.go, etc.)
-- `benchmark.go` - Main benchmark execution logic (`runBench`, `runServerBenchmark`, `runClientBenchmark`)
-- `benchserver.go` / `benchclient.go` - Distributed benchmarking coordination
-- `client.go` - S3 client creation and configuration
-- `flags.go` - Common flag definitions
-- `analyze.go` - Post-benchmark analysis
-- `ui.go` - Terminal UI using bubbletea
+**api/** - HTTP API 用于基准测试状态和控制（导入 pkg/bench 和 pkg/aggregate）
+- `api.go` - 提供 HTTP 端点用于监控运行中的基准测试
 
-### Key Patterns
+**cli/** - 命令行接口层（导入 api、pkg/aggregate、pkg/bench、pkg/generator）
+- 每种基准测试类型有对应文件（get.go、put.go、delete.go 等）
+- `benchmark.go` - 主基准测试执行逻辑（`runBench`、`runServerBenchmark`、`runClientBenchmark`）
+- `benchserver.go` / `benchclient.go` - 分布式基准测试协调
+- `client.go` - S3 客户端创建和配置
+- `flags.go` - 通用 flag 定义
+- `analyze.go` - 基准测试后分析
+- `ui.go` - 使用 bubbletea 的终端 UI
 
-**Benchmark Execution Flow:**
-1. CLI parses flags and creates benchmark instance
-2. `Prepare()` - Creates buckets, uploads initial objects if needed
-3. `Start()` - Runs concurrent operations until duration expires or autoterm triggers
-4. Operations recorded to `Collector` which writes to compressed CSV
-5. `Cleanup()` - Removes test data (unless `--keep-data` or `--noclear`)
-6. Analysis runs on recorded data, outputs statistics
+**wui/** - Web UI 服务器
+- 使用 `--web` 参数可启动 Web 界面实时监控基准测试进度
 
-**Distributed Benchmarking:**
-- Server mode: Coordinates multiple clients, merges their results
-- Client mode: Runs `warp client [address]` to listen for benchmark commands
-- Server sends benchmark configuration to all clients
-- Clients execute benchmarks simultaneously
-- Results collected and merged by server
+### 关键模式
 
-**Operation Collection:**
-- Each operation creates an `Operation` struct with timing, size, endpoint, error info
-- Sent to `Collector` which batches and compresses to `.csv.zst` files
-- Format: Tab-separated values with fields like idx, thread, op, client_id, n_objects, bytes, etc.
+**基准测试执行流程：**
+1. CLI 解析 flags 并创建基准测试实例
+2. `Prepare()` - 创建 bucket，上传初始对象（如需要）
+3. `Start()` - 运行并发操作直到时间结束或 autoterm 触发
+4. 操作记录到 `Collector`，写入压缩 CSV 文件
+5. `Cleanup()` - 清理测试数据（除非使用 `--keep-data` 或 `--noclear`）
+6. 分析记录数据，输出统计信息
 
-### Important Files
+**分布式基准测试：**
+- 服务器模式：协调多个客户端，合并结果
+- 客户端模式：运行 `warp client [address]` 监听基准测试命令
+- 服务器发送基准测试配置到所有客户端
+- 客户端同时执行基准测试
+- 结果由服务器收集和合并
 
-- `main.go` - Entry point, delegates to `cli.Main()`
-- `cli/cli.go` - Command registration (lines 89-104 list all benchmark commands)
-- `pkg/bench/benchmark.go` - Core Benchmark interface definition
-- `cli/benchmark.go:108` - `runBench()` is the main benchmark runner
+**操作收集：**
+- 每个操作创建 `Operation` 结构体，包含时间、大小、端点、错误信息
+- 发送到 `Collector`，批量压缩为 `.csv.zst` 文件
+- 格式：Tab 分隔值，字段包括 idx、thread、op、client_id、n_objects、bytes 等
 
-## Development Guidelines
+### 重要文件
 
-### Adding a New Benchmark Type
+- `main.go` - 入口点，委托给 `cli.Main()`
+- `cli/cli.go` - 命令注册（第 89-105 行列出所有基准测试命令）
+- `pkg/bench/benchmark.go` - 核心 Benchmark 接口定义
+- `cli/benchmark.go:108` - `runBench()` 是主基准测试运行器
 
-1. Create new file in `pkg/bench/` implementing the `Benchmark` interface
-2. Add corresponding command file in `cli/`
-3. Register command in `cli/cli.go` init function
-4. Follow existing patterns (see `get.go`, `put.go` as examples)
+### 基准测试命令列表
 
-### Testing S3 Compatibility
+基准测试命令：mixed、get、put、delete、list、stat、versioned、retention、multipart、multipart-put、zip、snowball、fanout、append、iceberg
 
-Warp is designed to test any S3-compatible storage. Connection configured via:
-- Flags: `--host`, `--access-key`, `--secret-key`, `--tls`, `--region`
-- Environment: `WARP_HOST`, `WARP_ACCESS_KEY`, `WARP_SECRET_KEY`, `WARP_TLS`, `WARP_REGION`
+工具命令：analyze、cmp、merge、client、run
 
-### YAML Configuration
+## 开发指南
 
-Benchmarks can be configured via YAML files in `yml-samples/`. Run with:
+### 添加新的基准测试类型
+
+1. 在 `pkg/bench/` 创建新文件实现 `Benchmark` 接口
+2. 在 `cli/` 添加对应的命令文件
+3. 在 `cli/cli.go` init 函数中注册命令
+4. 参考现有模式（如 `get.go`、`put.go`）
+
+### 测试 S3 兼容性
+
+Warp 设计用于测试任何 S3 兼容存储。连接配置：
+- Flags: `--host`、`--access-key`、`--secret-key`、`--tls`、`--region`
+- 环境变量: `WARP_HOST`、`WARP_ACCESS_KEY`、`WARP_SECRET_KEY`、`WARP_TLS`、`WARP_REGION`
+
+### YAML 配置
+
+基准测试可通过 `yml-samples/` 中的 YAML 文件配置。运行方式：
 ```bash
 warp run <file.yml>
 ```
 
-Variables can be injected: `warp run file.yml -var VarName=Value`
+可注入变量：`warp run file.yml -var VarName=Value`
 
-### Output Data Format
+### Iceberg 基准测试
 
-Benchmark data saved to `warp-operation-yyyy-mm-dd[hhmmss]-xxxx.csv.zst`:
-- Zstandard compressed CSV
-- Can be analyzed with `warp analyze <file>`
-- Can be compared with `warp cmp <before> <after>`
-- Can be merged from multiple clients with `warp merge <file1> <file2>...`
+支持 Apache Iceberg REST catalog 操作基准测试：
+- `warp iceberg catalog-read` - Catalog 读取操作
+- `warp iceberg catalog-commits` - 表/视图属性更新提交
+- `warp iceberg catalog-mixed` - 混合读写工作负载
+- `warp iceberg sustained` - 持续工作负载（带 RPS 控制）
 
-### Concurrency Model
+详见 `README_ICEBERG.md`
 
-- `--concurrent N` sets number of parallel operation threads
-- Each thread typically has its own prefix to avoid conflicts
-- Operations use context cancellation for clean shutdown
-- Client connections pooled via `c.Client()` function
+### 输出数据格式
 
-### Auto-termination
+基准测试数据保存为 `warp-operation-yyyy-mm-dd[hhmmss]-xxxx.csv.zst`：
+- Zstandard 压缩的 CSV
+- 可通过 `warp analyze <file>` 分析
+- 可通过 `warp cmp <before> <after>` 对比
+- 可通过 `warp merge <file1> <file2>...` 合并多个客户端结果
 
-When `--autoterm` enabled:
-- Continuously samples throughput into 25 time blocks
-- Checks if last 7 blocks are within `--autoterm.pct` threshold (default 7.5%)
-- Must maintain stability for `--autoterm.dur` (default 15s)
-- Prevents premature termination during warmup or unstable periods
+### 并发模型
 
-## Common Issues
+- `--concurrent N` 设置并行操作线程数
+- 每个线程通常有自己的前缀以避免冲突
+- 操作使用 context cancellation 实现优雅关闭
+- 客户端连接通过 `c.Client()` 函数池化
 
-### 32-bit Architectures
-Be careful with 64-bit atomic operations - use `atomic.AddUint64` with proper alignment (see commit 042a9fc for context).
+### 自动终止
 
-### TLS and Kernel TLS
-The project supports HTTP/2 and Kernel TLS (kTLS) for improved performance on Linux. See `cli/client_ktls.go` and `cli/client_transport.go`.
+启用 `--autoterm` 时：
+- 持续采样吞吐量到 25 个时间块
+- 检查最后 7 个块是否在 `--autoterm.pct` 阈值内（默认 7.5%）
+- 必须在 `--autoterm.dur` 时间内保持稳定（默认 15s）
+- 防止在预热或不稳定期间过早终止
 
-### InfluxDB Integration
-Real-time metrics can be pushed to InfluxDB v2+ using `--influxdb` flag. Connection string format: `<schema>://<token>@<hostname>:<port>/<bucket>/<org>?<tag=value>`
+### Web UI 监控
+
+使用 `--web` 参数可启动 Web 界面实时监控基准测试进度，浏览器会自动打开。
+
+## 常见问题
+
+### 32 位架构
+注意 64 位原子操作 - 使用 `atomic.AddUint64` 时需确保正确对齐（参见 commit 042a9fc）
+
+### TLS 和 Kernel TLS
+项目支持 HTTP/2 和 Kernel TLS (kTLS) 以提升 Linux 性能。参见 `cli/client_ktls.go` 和 `cli/client_transport.go`
+
+### InfluxDB 集成
+实时指标可推送到 InfluxDB v2+，使用 `--influxdb` flag。连接字符串格式：`<schema>://<token>@<hostname>:<port>/<bucket>/<org>?<tag=value>`
+
+### 多 NIC 基准测试
+客户端机器有多个 NIC 连接不同存储网络子网时，每个 NIC 运行一个 `warp client` 进程，指定监听 IP：
+```bash
+warp client 192.168.11.2:7761
+warp client 192.168.12.2:7761
+```
+Warp 自动将所有 S3 连接源绑定到监听 IP，确保流量只通过指定 NIC。
